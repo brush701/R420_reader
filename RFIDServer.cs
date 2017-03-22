@@ -51,6 +51,7 @@ namespace RFIDReader
             this.results = results;
             this.port = port;
             tcpListener = new TcpListener(IPAddress.Any, port);
+            delayMs = 1;
 
             connectionThread = new Thread(new ThreadStart(ListenForClients));
             txThread = new System.Threading.Thread(new System.Threading.ThreadStart(send));
@@ -169,9 +170,9 @@ namespace RFIDReader
                     if (result != null)
                     {
                         sendToClients(";" + result.makeMeAString() + "\n");
-                        Thread.Sleep(delayMs);
                     }
                 }
+                Thread.Sleep(delayMs);
             }
             foreach (NetworkStream client in clients) { client.Close(); }
         }
@@ -187,7 +188,8 @@ namespace RFIDReader
         {
             stopRequested = true;
             if (connectionThread.ThreadState == System.Threading.ThreadState.Running)
-                connectionThread.Join();
+                connectionThread.Abort(); //FIXME: AcceptTcpClient blocks indefinitely
+                //connectionThread.Join();
             if (txThread.ThreadState == System.Threading.ThreadState.Running)
                 txThread.Join();
         }

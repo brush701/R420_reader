@@ -25,7 +25,7 @@ namespace RFIDReader
         {
             InitializeComponent();
             model = new RFIDModel();
-            modelThread = new Thread(new ThreadStart(model.start));
+            modelThread = new Thread(new ThreadStart(() => { if (!model.Running) model.start(); }));
 
             modeComboBox.Items.AddRange(new object[] {
                 ReaderMode.MaxThroughput,
@@ -57,8 +57,8 @@ namespace RFIDReader
         private void connect_button_Click(object sender, System.EventArgs e)
         {
             try
-            {               
-                model.start();
+            {
+                modelThread.Start();
             }
     
             catch (Exception ex)
@@ -135,7 +135,8 @@ namespace RFIDReader
 
         private void disconnect_button_Click(object sender, System.EventArgs e)
         {
-            model.stop();
+            if (model.Running)
+                model.stop();
         }
 
         private void RFIDInterface_Load(object sender, System.EventArgs e)
@@ -160,7 +161,8 @@ namespace RFIDReader
 
         private void RFIDInterface_FormClosed(object sender, FormClosedEventArgs e)
         {
-            model.stop();
+            if (model.Running)
+                model.stop();
         }
 
         private void logfileTextBox_TextChanged(object sender, EventArgs e)

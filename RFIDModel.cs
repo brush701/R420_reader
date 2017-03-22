@@ -101,14 +101,19 @@ namespace RFIDReader
                 NotifyPropertyChanged();
             }
         }
-
-        private ushort delayMs;
+        
         public ushort DelayMS
         {
-            get { return delayMs; }
+            get
+            {
+                if (server != null)
+                    return server.delayMs;
+                else return 0;
+            }
             set
             {
-                delayMs = value;
+                if (server != null)
+                    server.delayMs = value;
                 NotifyPropertyChanged();
             }
         }
@@ -139,7 +144,12 @@ namespace RFIDReader
         public event EventHandler<ClientEventArgs> clientDisconnectedEvent;
 
         public RFIDModel()
-        {
+        {          
+            results = new ConcurrentQueue<RFIDResult>();
+            server = new RFIDServer(results);
+            server.clientConnectedEvent += new EventHandler<ClientEventArgs>(clientConnectedPassthrough);
+            server.clientDisconnectedEvent += new EventHandler<ClientEventArgs>(clientDisconnectedPassthrough);
+
             logging = false;
             Logfile = "";
             ReaderIP = "127.0.0.1";
@@ -148,12 +158,8 @@ namespace RFIDReader
             DelayMS = 1;
             Running = false;
 
-            results = new ConcurrentQueue<RFIDResult>();
-            server = new RFIDServer(results);
-            server.clientConnectedEvent += new EventHandler<ClientEventArgs>(clientConnectedPassthrough);
-            server.clientDisconnectedEvent += new EventHandler<ClientEventArgs>(clientDisconnectedPassthrough);
         }
-       
+
         private void restartIfRunning()
         {
             if (Running)
@@ -287,6 +293,7 @@ namespace RFIDReader
 
         public void start()
         {
+            if (Running) throw new InvalidOperationException("Cannot start a running model");
             if (logging) { openLogFile(); }
             if (rdr != null) disconnect();
             try
@@ -305,6 +312,7 @@ namespace RFIDReader
 
         public void stop()
         {
+            if (!Running) throw new InvalidOperationException("Cannot stop a model that isn't runnnig");
             try
             {
                 disconnect();
