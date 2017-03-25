@@ -19,13 +19,11 @@ namespace RFIDReader
     public partial class RFIDController : Form
     {
         private RFIDModel model;
-        private Thread modelThread;
 
         public RFIDController()
         {
             InitializeComponent();
             model = new RFIDModel();
-            modelThread = new Thread(new ThreadStart(() => { if (!model.Running) model.start(); }));
 
             modeComboBox.Items.AddRange(new object[] {
                 ReaderMode.MaxThroughput,
@@ -34,8 +32,8 @@ namespace RFIDReader
                 ReaderMode.DenseReaderM8
             });
 
-            model.clientConnectedEvent += new EventHandler<ClientEventArgs>(onClientConnected);
-            model.clientDisconnectedEvent += new EventHandler<ClientEventArgs>(onClientDisconnected);
+            model.ConnectedEvent += new EventHandler<ClientEventArgs>(onClientConnected);
+            model.DisconnectedEvent += new EventHandler<ClientEventArgs>(onClientDisconnected);
             model.startedEvent += new EventHandler(onStarted);
             model.stoppedEvent += new EventHandler(onStopped);
             model.newResultEvent += new EventHandler(onNewResult);
@@ -54,16 +52,19 @@ namespace RFIDReader
             e.Value = !((bool)e.Value);
         }
 
-        private void connect_button_Click(object sender, System.EventArgs e)
+        private async void connect_button_Click(object sender, System.EventArgs e)
         {
-            try
+            if (!model.Running)
             {
-                modelThread.Start();
-            }
-    
-            catch (Exception ex)
-            {
-                MessageBox.Show(ex.Message);
+                try
+                {
+                    await model.start();
+                }
+
+                catch (Exception ex)
+                {
+                    MessageBox.Show(ex.Message);
+                }
             }
         }
 
@@ -133,10 +134,10 @@ namespace RFIDReader
             }
         }
 
-        private void disconnect_button_Click(object sender, System.EventArgs e)
+        private async void disconnect_button_Click(object sender, System.EventArgs e)
         {
             if (model.Running)
-                model.stop();
+                await model.stop();
         }
 
         private void RFIDInterface_Load(object sender, System.EventArgs e)
@@ -159,10 +160,10 @@ namespace RFIDReader
             model.DelayMS = Convert.ToUInt16(delayTextBox.Text);
         }
 
-        private void RFIDInterface_FormClosed(object sender, FormClosedEventArgs e)
+        private async void RFIDInterface_FormClosed(object sender, FormClosedEventArgs e)
         {
             if (model.Running)
-                model.stop();
+                await model.stop();
         }
 
         private void logfileTextBox_TextChanged(object sender, EventArgs e)

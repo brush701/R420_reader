@@ -8,6 +8,7 @@ using System.Threading;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Diagnostics;
+using System.Threading.Tasks;
 
 namespace RFIDReader
 {
@@ -16,6 +17,7 @@ namespace RFIDReader
         public const int reader_port = 5084;
         private const int maxBufferSize = 5000;
         private const string impinj_mode = "default";
+        private const string server_uri = "ws://echo.websocket.org";
 
         private bool logging;
         public bool Logging
@@ -102,18 +104,18 @@ namespace RFIDReader
             }
         }
         
-        public ushort DelayMS
+        public int DelayMS
         {
             get
             {
                 if (server != null)
-                    return server.delayMs;
+                    return server.Delay.Milliseconds;
                 else return 0;
             }
             set
             {
                 if (server != null)
-                    server.delayMs = value;
+                    server.Delay = TimeSpan.FromMilliseconds(value);
                 NotifyPropertyChanged();
             }
         }
@@ -140,15 +142,15 @@ namespace RFIDReader
         public event EventHandler newResultEvent;
         public event EventHandler startedEvent;
         public event EventHandler stoppedEvent;
-        public event EventHandler<ClientEventArgs> clientConnectedEvent;
-        public event EventHandler<ClientEventArgs> clientDisconnectedEvent;
+        public event EventHandler<ClientEventArgs> ConnectedEvent;
+        public event EventHandler<ClientEventArgs> DisconnectedEvent;
 
         public RFIDModel()
         {          
             results = new ConcurrentQueue<RFIDResult>();
             server = new RFIDServer(results);
-            server.clientConnectedEvent += new EventHandler<ClientEventArgs>(clientConnectedPassthrough);
-            server.clientDisconnectedEvent += new EventHandler<ClientEventArgs>(clientDisconnectedPassthrough);
+            server.ConnectedEvent += new EventHandler<ClientEventArgs>(ConnectedPassthrough);
+            server.DisconnectedEvent += new EventHandler<ClientEventArgs>(DisconnectedPassthrough);
 
             logging = false;
             Logfile = "";
@@ -175,14 +177,14 @@ namespace RFIDReader
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));            
         }
 
-        private void clientConnectedPassthrough(object sender, ClientEventArgs e)
+        private void ConnectedPassthrough(object sender, ClientEventArgs e)
         {
-            clientConnectedEvent?.Invoke(this, e);
+            ConnectedEvent?.Invoke(this, e);
         }
 
-        private void clientDisconnectedPassthrough(object sender, ClientEventArgs e)
+        private void DisconnectedPassthrough(object sender, ClientEventArgs e)
         {
-            clientDisconnectedEvent?.Invoke(this, e);
+            DisconnectedEvent?.Invoke(this, e);
         }
 
         private void LoadSettings(string file="settings.xml")
@@ -291,7 +293,7 @@ namespace RFIDReader
             startedEvent(this, EventArgs.Empty);
         }
 
-        public void start()
+        public async Task start()
         {
             if (Running) throw new InvalidOperationException("Cannot start a running model");
             if (logging) { openLogFile(); }
@@ -299,18 +301,18 @@ namespace RFIDReader
             try
             {
                 Running = true;
-                connect(); //this starts the tag reader
+                //connect(); //this starts the tag reader
             } catch (OctaneSdkException e)
             {
                 Debug.WriteLine(e.ToString());
                 Running = false;
                 throw;
             }
-            server.start();
+            await server.Start(server_uri);
             return;
         }
 
-        public void stop()
+        public async Task stop()
         {
             if (!Running) throw new InvalidOperationException("Cannot stop a model that isn't runnnig");
             try
@@ -322,7 +324,7 @@ namespace RFIDReader
             }
             finally
             {
-                server.stop();
+                await server.Stop();
                 Running = false;
             }
             

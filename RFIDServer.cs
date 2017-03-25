@@ -4,7 +4,8 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Net;
-using System.Net.Sockets;
+using Newtonsoft.Json;
+using System.Net.WebSockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -30,169 +31,179 @@ namespace RFIDReader
 
     class RFIDServer
     {
-        private List<NetworkStream> clients = new List<NetworkStream>();
-        private object clientsLock = new object();
-        private TcpListener tcpListener;
-        private Thread connectionThread;
+        private static object consoleLock = new object();
+        private const int sendChunkSize = 1024;
+        private const int receiveChunkSize = 1024;
+        private const bool verbose = true;
+        private const string key = "ThisIsASecret";
+        public TimeSpan Delay
+        {
+            get;
+            set;
+        }            
+
+        private CancellationTokenSource source;        
+        private AuthenticationStatus authenticationStatus = AuthenticationStatus.UNAUTHENTICATED;
 
         public ConcurrentQueue<RFIDResult> results;
-        Thread txThread;
+        Thread serverThread;
 
-        private bool stopRequested;
         private int port;
-        public ushort delayMs { get; set; }
+        private ClientWebSocket webSocket;
+        private static UTF8Encoding encoder = new UTF8Encoding();
 
-        public event EventHandler<ClientEventArgs> clientConnectedEvent;
-        public event EventHandler<ClientEventArgs> clientDisconnectedEvent;
-        public event EventHandler<RequestEventArgs> clientRequestEvent;
+        public event EventHandler<ClientEventArgs> ConnectedEvent;
+        public event EventHandler<ClientEventArgs> DisconnectedEvent;
 
-        public RFIDServer(ConcurrentQueue<RFIDResult> results, ushort port=14)
+        private enum AuthenticationStatus { UNAUTHENTICATED, AUTHENTICATED, FAILED };
+
+        private event EventHandler authenticatedEvent;
+
+        public RFIDServer(ConcurrentQueue<RFIDResult> results, ushort port = 14)
         {
             this.results = results;
             this.port = port;
-            tcpListener = new TcpListener(IPAddress.Any, port);
-            delayMs = 1;
-
-            connectionThread = new Thread(new ThreadStart(ListenForClients));
-            txThread = new System.Threading.Thread(new System.Threading.ThreadStart(send));
-
-            stopRequested = true;
+            source = new CancellationTokenSource();
+            Delay = TimeSpan.FromMilliseconds(1000); 
         }
 
-        private void ListenForClients()
+        private async Task Send(ClientWebSocket webSocket, CancellationToken token)
         {
-            this.tcpListener.Start();
+            Dictionary<string, string> dict = new Dictionary<string, string>();
+            dict.Add("type", "auth");
+            dict.Add("key", key);
+            string request = JsonConvert.SerializeObject(dict);
 
-            while (!stopRequested)
+            byte[] buffer = encoder.GetBytes(request);
+            if (webSocket.State == WebSocketState.Open)
+                await webSocket.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, token);
+
+            while (webSocket.State == WebSocketState.Open && !token.IsCancellationRequested)
             {
-                Console.WriteLine("Waiting for a connection...");
-                //blocks until a client has connected to the server
-                TcpClient client = this.tcpListener.AcceptTcpClient();
-
-                //create a thread to handle communication 
-                //with connected client
-                Thread clientThread = new Thread(new ParameterizedThreadStart(HandleClientComm));
-                clientThread.Start(client);
-            }
-            tcpListener.Stop();
-        }
-
-        private void HandleClientComm(object client)
-        {
-            try
-            {
-                TcpClient tcpClient = (TcpClient)client;
-                tcpClient.SendBufferSize = 100000000;
-                NetworkStream clientStream = tcpClient.GetStream();
-                lock (clientsLock) clients.Add(clientStream);
-                Console.WriteLine("client received. total clients:" + clients.Count);
-                clientConnectedEvent(this, new ClientEventArgs(clients.Count));
-                bool bClosed = false;
-                byte[] buff = new byte[1];
-                byte[] myReadBuffer = new byte[1024];
-                
-                string[] antennaInfoChange = { "1", "30" };
-
-                while (!bClosed && !stopRequested && tcpClient.Client.Poll(0, SelectMode.SelectRead))
-                {                    
-                    if (tcpClient.Client.Receive(buff, SocketFlags.Peek) == 0)
-                    {
-                        // Client disconnected
-                        bClosed = true;
-                        lock (clientsLock) clients.Remove(clientStream);
-                        tcpClient.Close();
-                        clientDisconnectedEvent?.Invoke(this, new ClientEventArgs(clients.Count));
-                        return;
-                    }
-
-                    StringBuilder myCompleteMessage = new StringBuilder();
-                    int numberOfBytesRead = 0;
-
-                    // Incoming message may be larger than the buffer size. 
-                    do
-                    {
-                        numberOfBytesRead = clientStream.Read(myReadBuffer, 0, myReadBuffer.Length);
-                        myCompleteMessage.AppendFormat("{0}", Encoding.ASCII.GetString(myReadBuffer, 0, numberOfBytesRead));
-                    } while (clientStream.DataAvailable);
-
-                    Debug.WriteLine(myCompleteMessage.ToString());
-                    antennaInfoChange = myCompleteMessage.ToString().Split(' ');
-                    Debug.WriteLine(antennaInfoChange[0]);
-                    Debug.WriteLine(antennaInfoChange[1]);
-
-                    uint antenna = Convert.ToUInt16(antennaInfoChange[0]);
-                    uint power = Convert.ToUInt16(antennaInfoChange[1]);
-
-                    clientRequestEvent?.Invoke(this, new RequestEventArgs(antenna, power));
-                    Thread.Sleep(1000);
+                while (authenticationStatus == AuthenticationStatus.UNAUTHENTICATED)
+                {
+                    await Task.Delay(Delay);
+                    if (authenticationStatus == AuthenticationStatus.FAILED) return;
                 }
-                lock (clientsLock) clients.Remove(clientStream);
-                tcpClient.Close();
-                clientDisconnectedEvent?.Invoke(this, new ClientEventArgs(clients.Count));
-            }
-            catch (Exception e)
-            {
-                Debug.WriteLine(e.ToString());
+
+                RFIDResult result;
+                while (!results.TryDequeue(out result)) await Task.Delay(Delay);
+                if (result != null)
+                {
+                    request = JsonConvert.SerializeObject(result);
+                    buffer = encoder.GetBytes(request);
+                    await webSocket.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, token);
+                    LogStatus(false, buffer, buffer.Length);
+                }                
             }
         }
 
-        private void sendToClients(String msg)
+        private async Task Receive(ClientWebSocket webSocket, CancellationToken token)
         {
-            for (int i = 0; i < clients.Count; i++)
+            byte[] buffer = new byte[receiveChunkSize];
+           
+            while (webSocket.State == WebSocketState.Open && !token.IsCancellationRequested)
             {
-
-                NetworkStream clientStream = clients[i];
-                ASCIIEncoding encoder = new ASCIIEncoding();
-                byte[] buffer = encoder.GetBytes(msg);
-
+                string response = "";
+                WebSocketReceiveResult result = new WebSocketReceiveResult(0, WebSocketMessageType.Text, false);
+                while (!result.EndOfMessage)
+                {
+                    result = await webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), token);
+                    response += encoder.GetString(buffer);
+                }
+                
+                if (result.MessageType == WebSocketMessageType.Close)
+                {
+                    await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, string.Empty, token);
+                }
+                else
+                {
+                    LogStatus(true, buffer, result.Count);
+                }
                 try
                 {
-                    clientStream.Write(buffer, 0, buffer.Length);
-                    clientStream.Flush();
+                    Dictionary<string, string> res = JsonConvert.DeserializeObject<Dictionary<string, string>>(response);
+                
+                    if (!res.ContainsKey("type")) throw new JsonException("Invalid response from server");
+
+                    if (res["type"] == "auth")
+                    {
+                        if (!res.ContainsKey("value")) throw new JsonException("Invalid response from server");
+                        if (res["value"] == "success")
+                        {
+                            authenticatedEvent?.Invoke(this, EventArgs.Empty);
+                            authenticationStatus = AuthenticationStatus.AUTHENTICATED;
+                        }
+                        else authenticationStatus = AuthenticationStatus.FAILED;
+                    }
                 }
-                catch (System.IO.IOException ex)
+                catch (Exception ex)
                 {
-                    lock(clientsLock) clients.Remove(clientStream);
-                    clientDisconnectedEvent?.Invoke(this, new ClientEventArgs(clients.Count));
                     Debug.WriteLine(ex.ToString());
                 }
             }
-        }
+        }       
 
-        private void send()
+        private static void LogStatus(bool receiving, byte[] buffer, int length)
         {
-            while (!stopRequested)
+            lock (consoleLock)
             {
-                if (results.Count > 0)
-                {
-                    RFIDResult result;
-                    while (!results.TryDequeue(out result)) Thread.Sleep(10);
-                    if (result != null)
-                    {
-                        sendToClients(";" + result.makeMeAString() + "\n");
-                    }
-                }
-                Thread.Sleep(delayMs);
+                Console.ForegroundColor = receiving ? ConsoleColor.Green : ConsoleColor.Gray;
+                //Console.WriteLine("{0} ", receiving ? "Received" : "Sent");
+
+                if (verbose)
+                    Console.WriteLine(encoder.GetString(buffer));
+
+                Console.ResetColor();
             }
-            foreach (NetworkStream client in clients) { client.Close(); }
+        }
+ 
+
+        private async Task<ClientWebSocket> Connect(string uri)
+        {
+            ClientWebSocket socket = null;
+
+            try
+            {
+                socket = new ClientWebSocket();
+                await socket.ConnectAsync(new Uri(uri), source.Token);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine("Exception: {0}", ex);
+            }
+            return socket;
+        }        
+        
+        public async Task Start(string uri)
+        {
+            webSocket = await Connect(uri);
+            serverThread = new Thread(new ThreadStart(async () =>
+            {
+                await Task.WhenAll(Receive(webSocket, source.Token), Send(webSocket, source.Token));
+            }));
+            serverThread.Start();
         }
 
-        public void start()
+        public async Task Stop()
         {
-            stopRequested = false;
-            connectionThread.Start();
-            txThread.Start();
+            source.Cancel();
+            serverThread.Join();
+            if (webSocket.State != WebSocketState.Closed)
+                await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, string.Empty, source.Token);
+
+            if (webSocket != null)
+                webSocket.Dispose();
+            source.Dispose();
+            Debug.WriteLine("");
+
+            lock (consoleLock)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine("WebSocket closed.");
+                Console.ResetColor();
+            }
         }
 
-        public void stop()
-        {
-            stopRequested = true;
-            if (connectionThread.ThreadState == System.Threading.ThreadState.Running)
-                connectionThread.Abort(); //FIXME: AcceptTcpClient blocks indefinitely
-                //connectionThread.Join();
-            if (txThread.ThreadState == System.Threading.ThreadState.Running)
-                txThread.Join();
-        }
-       
     }
 }
